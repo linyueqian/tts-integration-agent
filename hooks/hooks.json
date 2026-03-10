@@ -1,0 +1,22 @@
+{
+  "hooks": [
+    {
+      "type": "PreToolUse",
+      "matcher": "Edit",
+      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-existing-models.sh",
+      "description": "Prevent modifications to existing model files (qwen3_tts, cosyvoice3, etc.)"
+    },
+    {
+      "type": "PreToolUse",
+      "matcher": "Write",
+      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard-existing-models.sh",
+      "description": "Prevent writing over existing model files"
+    },
+    {
+      "type": "PostToolUse",
+      "matcher": "Bash",
+      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/log-iteration.sh",
+      "description": "Log bash outputs during integration loop for debugging"
+    }
+  ]
+}
