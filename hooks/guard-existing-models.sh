@@ -8,6 +8,7 @@ PROTECTED_MODELS=(
     "cosyvoice3"
     "stable_audio"
     "mimo_audio"
+    "fish_speech"
 )
 
 # Read the file path from the tool input (passed via stdin as JSON)

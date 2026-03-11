@@ -46,34 +46,47 @@ python -c "from huggingface_hub import list_repo_files; [print(f) for f in list_
 ```
 
 3. If the model has modeling code on HuggingFace, fetch and read it to understand:
-   - Main components (AR model, decoder, vocoder, flow, etc.)
-   - Input format (text tokens, phonemes, etc.)
+   - Main components (AR model, decoder, vocoder, flow, dual-AR, etc.)
+   - Input format (text tokens, phonemes, chat template, etc.)
    - Intermediate representation (codec codes, mel, etc.)
    - Output format (waveform)
-   - Codec frame rate
+   - Codec frame rate, sample rate, number of codebooks
 
-4. Write analysis to `$WORK_DIR/analysis.md`
+4. **Search for reference implementations** on GitHub (sglang-omni, original repo, etc.)
+   These reveal critical details like RoPE style, embedding normalization, token mappings.
 
-5. Determine stages:
+5. Write analysis to `$WORK_DIR/analysis.md`
+
+6. Determine architecture pattern:
+   - **Single-AR** (like Qwen3-TTS): One AR model generates all codebooks
+   - **Dual-AR** (like Fish Speech): Slow AR for semantic + Fast AR for residual codebooks
+   - **Flow/DiT**: Non-autoregressive decoder
+
+7. Determine stages:
    - Stage 0: AR model (text -> codec) with worker_type: ar
    - Stage 1: Decoder (codec -> waveform) with worker_type: generation
 
 ## Phase 2: Generate Code
 
-**FIRST** read these reference files:
-- `$VLLM_DIR/vllm_omni/model_executor/stage_configs/qwen3_tts.yaml`
-- `$VLLM_DIR/vllm_omni/model_executor/stage_configs/qwen3_tts_async_chunk.yaml`
+**FIRST** read BOTH reference implementations:
+- `$VLLM_DIR/vllm_omni/model_executor/stage_configs/qwen3_tts.yaml` (single-AR)
+- `$VLLM_DIR/vllm_omni/model_executor/stage_configs/fish_speech_s2_pro.yaml` (dual-AR)
 - `$VLLM_DIR/vllm_omni/model_executor/stage_input_processors/qwen3_tts.py`
-- `$VLLM_DIR/vllm_omni/model_executor/models/qwen3_tts/` (all files)
+- `$VLLM_DIR/vllm_omni/model_executor/stage_input_processors/fish_speech.py`
+- `$VLLM_DIR/vllm_omni/model_executor/models/qwen3_tts/` (single-AR reference)
+- `$VLLM_DIR/vllm_omni/model_executor/models/fish_speech/` (dual-AR reference)
+- `$VLLM_DIR/vllm_omni/entrypoints/openai/serving_speech.py` (online serving)
 - `$VLLM_DIR/docs/models/tts_developer_guide.md` (if exists)
 
 Then generate:
 
 1. **Stage config YAML**: `$VLLM_DIR/vllm_omni/model_executor/stage_configs/<model>.yaml`
-2. **Async chunk config**: `$VLLM_DIR/vllm_omni/model_executor/stage_configs/<model>_async_chunk.yaml`
-3. **Stage input processor**: `$VLLM_DIR/vllm_omni/model_executor/stage_input_processors/<model>.py`
-4. **Model wrapper**: `$VLLM_DIR/vllm_omni/model_executor/models/<model>/`
-5. **Model registration**: Update `$VLLM_DIR/vllm_omni/model_executor/models/__init__.py`
+   - Include async_chunk and connector config for streaming
+2. **Stage input processor**: `$VLLM_DIR/vllm_omni/model_executor/stage_input_processors/<model>.py`
+3. **Model wrapper**: `$VLLM_DIR/vllm_omni/model_executor/models/<model>/`
+4. **Model registration**: Update `$VLLM_DIR/vllm_omni/model_executor/models/__init__.py`
+5. **Online serving**: Add model_stage to `_TTS_MODEL_STAGES` in serving_speech.py
+   - Add model-specific prompt builder if needed
 
 ## Phase 3: Build Check
 
@@ -149,18 +162,58 @@ On ANY failure:
 4. Fix the code based on diagnosis
 5. Go back to the failed phase
 
+## Phase 6b: Online Serving Test
+
+After offline validation, test online serving:
+
+1. Start server:
+```bash
+cd $VLLM_DIR
+vllm-omni serve "$MODEL_ID" \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/<model>.yaml \
+    --omni --trust-remote-code --enforce-eager --port 8091
+```
+
+2. Test `/v1/audio/speech`:
+```bash
+curl -X POST http://localhost:8091/v1/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{"model":"$MODEL_ID","input":"Hello world","voice":"default"}' \
+    --output $WORK_DIR/online_test.wav
+```
+
+3. Test streaming:
+```bash
+curl -X POST http://localhost:8091/v1/audio/speech \
+    -H "Content-Type: application/json" \
+    -d '{"model":"$MODEL_ID","input":"Hello world","voice":"default","stream":true,"response_format":"pcm"}' \
+    --output $WORK_DIR/stream_test.pcm
+```
+
 ## Completion
 
 When all 3 test sentences pass ASR verification:
 1. Write a summary to `$WORK_DIR/report.md`
 2. List all files created/modified
 3. Show the verification results
-4. Suggest next steps (e2e tests, online serving test, PR)
+4. Suggest next steps (online serving test, voice cloning, PR)
+
+## Debugging Checklist (from real integration experience)
+
+When audio is noise/garbage, check IN ORDER:
+1. **RoPE style** - vLLM defaults NeoX; many models use interleaved (is_neox_style=False)
+2. **Embedding normalization** - sqrt(num_codebooks + 1) scaling often required
+3. **Codec hop length** - product of decoder rates x quantizer downsample factors
+4. **Token ID mapping** - verify ranges with tokenizer
+5. **Sampling params** - repetition_penalty (vLLM global != windowed), stop tokens
+6. **Codebook layout** - codebook-major vs frame-major agreement
+7. **Dtype** - some decoders need float32
 
 ## Rules
 
-- NEVER modify existing Qwen3-TTS files
-- ALWAYS read reference code before generating new code
+- NEVER modify existing model files (Qwen3-TTS, Fish Speech, CosyVoice3, etc.)
+- ALWAYS read BOTH reference implementations before generating new code
+- ALWAYS search for reference implementations (sglang, original repo) during analysis
 - Follow ruff style (120 char line limit)
 - Log every iteration
 - Stop after $MAX_ITER failures
